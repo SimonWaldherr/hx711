@@ -5,8 +5,11 @@ package hx711
 import (
 	"fmt"
 	"log"
+	"math"
 	"sort"
 	"time"
+
+	"github.com/SimonWaldherr/golang-moving-average"
 )
 
 var ErrTimeout = fmt.Errorf("timeout")
@@ -132,7 +135,7 @@ func (hx711 *Hx711) ReadDataMedianThenMovingAvgs(numReadings, numAvgs int, previ
 	return result / float64(len(*previousReadings)), nil
 }
 
-// BackgroundReadMovingAvgs it meant to be run in the background, run as a Goroutine.
+// BackgroundReadMovingAvgs is meant to be run in the background, run as a Goroutine.
 // Will continue to get readings and update movingAvg until stop is set to true.
 // After it has been stopped, the stopped chan will be closed.
 // Note when scale errors the movingAvg value will not change.
@@ -143,7 +146,7 @@ func (hx711 *Hx711) BackgroundReadMovingAvgs(numReadings, numAvgs int, movingAvg
 	var err error
 	var data int
 	var result float64
-	previousReadings := make([]float64, 0, numAvgs)
+	ma := movingaverage.New(numAvgs)
 
 	for {
 		err = hx711.Reset()
@@ -162,18 +165,106 @@ func (hx711 *Hx711) BackgroundReadMovingAvgs(numReadings, numAvgs int, movingAvg
 		}
 
 		result = float64(data-hx711.AdjustZero) / hx711.AdjustScale
-		if len(previousReadings) < numAvgs {
-			previousReadings = append(previousReadings, result)
-		} else {
-			previousReadings = append(previousReadings[1:numAvgs], result)
+		ma.Add(result)
+
+		*movingAvg = ma.Arithmetic()
+	}
+
+	hx711.Shutdown()
+
+	close(stopped)
+}
+
+// BackgroundReadMovingMedian is meant to be run in the background, run as a Goroutine.
+// Will continue to get readings and update movingAvg until stop is set to true.
+// After it has been stopped, the stopped chan will be closed.
+// Note when scale errors the movingAvg value will not change.
+// Do not call Reset before or Shutdown after.
+// Reset and Shutdown are called for you.
+// Will panic if movingAvg or stop are nil
+func (hx711 *Hx711) BackgroundReadMovingMedian(movingMeasurements int, movingAvg *float64, stop *bool, stopped chan struct{}) {
+	var err error
+	var data int
+	var result float64
+	ma := movingaverage.New(movingMeasurements)
+
+	for {
+		err = hx711.Reset()
+		if err == nil {
+			break
+		}
+		log.Print("hx711 BackgroundReadMovingMedian Reset error:", err)
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	for !*stop {
+		data, err = hx711.ReadDataRaw()
+		if err != nil && err.Error() != "stopped" {
+			log.Print("hx711 BackgroundReadMovingMedian ReadDataMedian error:", err)
+			continue
 		}
 
-		result = 0
-		for i := range previousReadings {
-			result += previousReadings[i]
+		result = float64(data-hx711.AdjustZero) / hx711.AdjustScale
+		ma.Add(result)
+
+		*movingAvg = ma.Median()
+	}
+
+	hx711.Shutdown()
+
+	close(stopped)
+}
+
+// BackgroundRead is meant to be run in the background, run as a Goroutine.
+// Will continue to get readings and update measurement, movingAvg, 
+// movingMedian and movingGeometric until stop is set to true.
+// After it has been stopped, the stopped chan will be closed.
+// Note when scale errors the movingAvg value will not change.
+// Do not call Reset before or Shutdown after.
+// Reset and Shutdown are called for you.
+// Will panic if movingAvg or stop are nil
+func (hx711 *Hx711) BackgroundRead(movingMeasurements int, measurement *float64, movingAvg *float64, movingMedian *float64, movingGeometric *float64, stop *bool, stopped chan struct{}) {
+	var err error
+	var data int
+	var result, prevResult float64
+	ma := movingaverage.New(movingMeasurements)
+
+	for {
+		err = hx711.Reset()
+		if err == nil {
+			break
+		}
+		log.Print("hx711 BackgroundReadMovingMedian Reset error:", err)
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	for !*stop {
+		data, err = hx711.ReadDataRaw()
+		if err != nil && err.Error() != "stopped" {
+			log.Print("hx711 BackgroundReadMovingMedian ReadDataMedian error:", err)
+			continue
 		}
 
-		*movingAvg = result / float64(len(previousReadings))
+		result = float64(data-hx711.AdjustZero) / hx711.AdjustScale
+
+		if math.Abs(result-prevResult) > 300 {
+			stop := false
+			data, err = hx711.readDataMedianRaw(3, &stop)
+			if err != nil && err.Error() != "stopped" {
+				log.Print("hx711 BackgroundReadMovingMedian ReadDataMedian error:", err)
+				continue
+			}
+			result = float64(data-hx711.AdjustZero) / hx711.AdjustScale
+		}
+
+		prevResult = result
+
+		ma.Add(result)
+
+		*measurement = result
+		*movingAvg = ma.Arithmetic()
+		*movingMedian = ma.Median()
+		*movingGeometric = ma.Geometric()
 	}
 
 	hx711.Shutdown()
